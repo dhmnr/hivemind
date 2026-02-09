@@ -1,0 +1,21 @@
+[project]
+name = "hivemind"
+version = "0.1.0"
+description = "Discord agent orchestrator for Claude Code"
+requires-python = ">=3.12"
+dependencies = [
+    "claude-code-sdk>=0.0.25",
+    "discord.py>=2.6",
+    "python-dotenv>=1.0",
+    "PyYAML>=6.0",
+]
+
+[project.scripts]
+hivemind = "hivemind.bot:run_bot"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hivemind"]

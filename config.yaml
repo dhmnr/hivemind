@@ -1,0 +1,27 @@
+discord:
+  bot_token: ${DISCORD_BOT_TOKEN}
+
+projects:
+  siphon-align:
+    path: ~/siphon-align
+    system_prompt: "You are working on a post-training toolkit implementing RLHF, DPO, GRPO, and Constitutional AI."
+    allowed_tools:
+      - Read
+      - Write
+      - Edit
+      - Bash
+      - Glob
+      - Grep
+      - mcp__human__ask_human
+
+  eldengym:
+    path: ~/eldengym
+    system_prompt: "You are working on an Elden Ring RL environment with C++ gRPC server and Python Gymnasium wrapper."
+    allowed_tools:
+      - Read
+      - Write
+      - Edit
+      - Bash
+      - Glob
+      - Grep
+      - mcp__human__ask_human
