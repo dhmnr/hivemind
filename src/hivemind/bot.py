@@ -97,8 +97,14 @@ class HivemindBot(discord.Client):
 
     async def setup_hook(self) -> None:
         _register_commands(self)
-        await self.tree.sync()
-        log.info("Slash commands synced")
+        if self.config.guild_id:
+            guild = discord.Object(id=self.config.guild_id)
+            self.tree.copy_global_to(guild=guild)
+            await self.tree.sync(guild=guild)
+            log.info("Slash commands synced to guild %s", self.config.guild_id)
+        else:
+            await self.tree.sync()
+            log.info("Slash commands synced globally (may take up to 1h)")
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s (id=%s)", self.user, self.user.id)

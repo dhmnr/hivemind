@@ -23,6 +23,7 @@ class ProjectPreset:
 @dataclass
 class Config:
     bot_token: str
+    guild_id: int | None = None
     project_presets: dict[str, ProjectPreset] = field(default_factory=dict)
 
     @classmethod
@@ -47,7 +48,11 @@ class Config:
                 allowed_tools=d.get("allowed_tools", []),
             )
 
+        guild_id_raw = data.get("discord", {}).get("guild_id", "")
+        guild_id = int(guild_id_raw) if guild_id_raw and str(guild_id_raw).isdigit() else None
+
         return cls(
             bot_token=data.get("discord", {}).get("bot_token", ""),
+            guild_id=guild_id,
             project_presets=presets,
         )

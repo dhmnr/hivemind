@@ -1,5 +1,6 @@
 discord:
   bot_token: ${DISCORD_BOT_TOKEN}
+  guild_id: ${DISCORD_GUILD_ID}
 
 projects:
   siphon-align:
