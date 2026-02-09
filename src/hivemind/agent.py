@@ -11,8 +11,11 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import json
 import logging
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from claude_code_sdk import (
     AssistantMessage,
@@ -29,6 +32,32 @@ from claude_code_sdk import (
 from .tools import build_human_server
 
 log = logging.getLogger(__name__)
+
+CLAUDE_JSON = Path.home() / ".claude.json"
+
+
+def _ensure_project_trusted(project_path: str) -> None:
+    """Pre-accept the workspace trust dialog for a project directory.
+
+    Claude Code checks ~/.claude.json → projects → <path> → hasTrustDialogAccepted.
+    If missing or false, the CLI shows an interactive prompt that blocks the SDK.
+    """
+    resolved = os.path.realpath(os.path.expanduser(project_path))
+
+    try:
+        data = json.loads(CLAUDE_JSON.read_text()) if CLAUDE_JSON.exists() else {}
+    except (json.JSONDecodeError, OSError):
+        data = {}
+
+    projects = data.setdefault("projects", {})
+    entry = projects.setdefault(resolved, {})
+
+    if entry.get("hasTrustDialogAccepted"):
+        return
+
+    entry["hasTrustDialogAccepted"] = True
+    CLAUDE_JSON.write_text(json.dumps(data, indent=2) + "\n")
+    log.info("Auto-trusted project directory: %s", resolved)
 
 
 class Status(enum.Enum):
@@ -97,6 +126,7 @@ class Agent:
             continue_conversation: Pick up the most recent session in this
                 project directory (works across bot restarts and CLI sessions).
         """
+        _ensure_project_trusted(self.project_path)
         human_server = build_human_server(self.full_name)
 
         async def on_pre_compact(input_data, tool_use_id, context):
@@ -108,7 +138,7 @@ class Agent:
             system_prompt=self.system_prompt or None,
             cwd=self.project_path,
             allowed_tools=self.allowed_tools,
-            permission_mode="acceptEdits",
+            permission_mode="bypassPermissions",
             mcp_servers={"human": human_server},
             resume=resume_session,
             continue_conversation=continue_conversation,

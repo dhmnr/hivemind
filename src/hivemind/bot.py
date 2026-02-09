@@ -7,9 +7,11 @@ independent Agents (each with its own channel and ClaudeSDKClient session).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import discord
 from discord import app_commands
@@ -21,6 +23,8 @@ from .sessions import list_sessions
 from .views import status_embed
 
 log = logging.getLogger(__name__)
+
+STATE_FILE = Path("state.json")
 
 DEFAULT_TOOLS = [
     "Read", "Write", "Edit", "Bash", "Glob", "Grep",
@@ -54,6 +58,45 @@ class HivemindBot(discord.Client):
         self.projects: dict[str, Project] = {}
         self._consumer_tasks: dict[str, asyncio.Task] = {}
         self._approval_task: asyncio.Task | None = None
+
+    # ------------------------------------------------------------------
+    # State persistence
+    # ------------------------------------------------------------------
+
+    def _save_state(self) -> None:
+        """Serialize project metadata to STATE_FILE."""
+        data = {}
+        for name, proj in self.projects.items():
+            data[name] = {
+                "name": proj.name,
+                "path": proj.path,
+                "category_id": proj.category_id,
+                "main_channel_id": proj.main_channel_id,
+                "system_prompt": proj.system_prompt,
+                "allowed_tools": proj.allowed_tools,
+            }
+        STATE_FILE.write_text(json.dumps(data, indent=2))
+        log.info("State saved (%d projects)", len(data))
+
+    def _load_state(self) -> None:
+        """Load project metadata from STATE_FILE if it exists."""
+        if not STATE_FILE.exists():
+            return
+        try:
+            data = json.loads(STATE_FILE.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            log.warning("Failed to load state file: %s", exc)
+            return
+        for name, info in data.items():
+            self.projects[name] = Project(
+                name=info["name"],
+                path=info["path"],
+                category_id=info["category_id"],
+                main_channel_id=info["main_channel_id"],
+                system_prompt=info.get("system_prompt", ""),
+                allowed_tools=info.get("allowed_tools", []),
+            )
+        log.info("State loaded (%d projects)", len(self.projects))
 
     # ------------------------------------------------------------------
     # Helpers
@@ -108,6 +151,7 @@ class HivemindBot(discord.Client):
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s (id=%s)", self.user, self.user.id)
+        self._load_state()
         self._approval_task = asyncio.create_task(
             consume_approval_requests(self, self),
             name="approval-consumer",
@@ -223,6 +267,7 @@ def _register_commands(bot: HivemindBot) -> None:
             allowed_tools=tools,
         )
         bot.projects[name] = project
+        bot._save_state()
 
         await interaction.followup.send(
             f"Project **{name}** created → `{proj_path}`\n"
@@ -262,6 +307,7 @@ def _register_commands(bot: HivemindBot) -> None:
             await agent.stop()
 
         del bot.projects[name]
+        bot._save_state()
 
         guild = interaction.guild
         if guild:
