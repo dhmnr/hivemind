@@ -1,8 +1,11 @@
-"""Custom MCP tools for human-in-the-loop interaction.
+"""Custom MCP tools for human-in-the-loop and agent collaboration.
 
 Provides the `ask_human` tool that Claude agents can call to request
 human input via Discord, and the ApprovalBridge that coordinates
 between the MCP tool handler and Discord UI callbacks.
+
+Also provides collaboration tools (`post_to_main`, `list_agents`) that
+let agents communicate through the project's #main channel.
 """
 
 from __future__ import annotations
@@ -10,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from claude_code_sdk import create_sdk_mcp_server, tool
@@ -120,3 +124,109 @@ def build_human_server(agent_name: str):
         return {"content": [{"type": "text", "text": f"Human responded: {response}"}]}
 
     return create_sdk_mcp_server("human", tools=[ask_human])
+
+
+# ---------------------------------------------------------------------------
+# Collaboration bridge – agent-to-#main channel messaging
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CollabMessage:
+    """An agent wants to post a message to #main."""
+
+    agent_name: str  # full_name like "project/agent"
+    message: str
+    mentioned_agents: list[str]
+
+
+class CollabBridge:
+    """Fire-and-forget queue for agent messages destined for #main."""
+
+    def __init__(self) -> None:
+        self._queue: asyncio.Queue[CollabMessage] = asyncio.Queue()
+
+    async def post(
+        self, agent_name: str, message: str, mentioned_agents: list[str]
+    ) -> None:
+        await self._queue.put(
+            CollabMessage(
+                agent_name=agent_name,
+                message=message,
+                mentioned_agents=mentioned_agents,
+            )
+        )
+
+    async def wait_for_message(self) -> CollabMessage:
+        return await self._queue.get()
+
+
+collab_bridge = CollabBridge()
+
+
+def build_collab_server(
+    agent_name: str,
+    get_peers: Callable[[], list[dict[str, str]]],
+):
+    """Build an MCP server with collaboration tools bound to a specific agent."""
+
+    @tool(
+        "post_to_main",
+        "Post a message to the project's #main channel. All team members "
+        "(human and agent) can see it. Use @agent_name to address a specific "
+        "peer (e.g. '@tester the API is ready for testing').",
+        {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "The message to post. Use @agent_name to mention peers.",
+                },
+            },
+            "required": ["message"],
+        },
+    )
+    async def post_to_main(args: dict) -> dict:
+        message = args["message"]
+        peers = get_peers()
+        peer_names = {p["name"] for p in peers}
+        mentioned: list[str] = []
+        for word in message.split():
+            if word.startswith("@"):
+                name = word[1:].strip(".,!?;:")
+                if name in peer_names:
+                    mentioned.append(name)
+        await collab_bridge.post(agent_name, message, mentioned)
+        return {"content": [{"type": "text", "text": "Message posted to #main."}]}
+
+    @tool(
+        "list_agents",
+        "List all agents in your project with their current status, role, "
+        "and what they're working on.",
+        {
+            "type": "object",
+            "properties": {},
+        },
+    )
+    async def list_agents(args: dict) -> dict:
+        peers = get_peers()
+        if not peers:
+            return {
+                "content": [
+                    {"type": "text", "text": "No other agents in this project."}
+                ]
+            }
+        lines: list[str] = []
+        for p in peers:
+            line = f"- {p['name']} [{p['status']}]"
+            if p.get("persona"):
+                line += f" ({p['persona']})"
+            elif p.get("role"):
+                line += f" ({p['role']})"
+            if p.get("current_task"):
+                line += f": {p['current_task']}"
+            lines.append(line)
+        text = "Agents in this project:\n" + "\n".join(lines)
+        return {"content": [{"type": "text", "text": text}]}
+
+    return create_sdk_mcp_server("collab", tools=[post_to_main, list_agents])

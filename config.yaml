@@ -14,6 +14,8 @@ projects:
       - Glob
       - Grep
       - mcp__human__ask_human
+      - mcp__collab__post_to_main
+      - mcp__collab__list_agents
 
   eldengym:
     path: ~/eldengym
@@ -26,3 +28,5 @@ projects:
       - Glob
       - Grep
       - mcp__human__ask_human
+      - mcp__collab__post_to_main
+      - mcp__collab__list_agents

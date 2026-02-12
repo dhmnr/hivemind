@@ -14,8 +14,8 @@ from typing import TYPE_CHECKING
 
 import discord
 
-from .agent import AgentEvent
-from .tools import approval_bridge
+from .agent import AgentEvent, Status
+from .tools import approval_bridge, collab_bridge
 from .views import ApprovalView, event_embed
 
 if TYPE_CHECKING:
@@ -37,6 +37,8 @@ TOOL_EMOJIS = {
     "Glob": "\U0001f50d",
     "Grep": "\U0001f50e",
     "ask_human": "\U0001f9d1",
+    "post_to_main": "\U0001f4e2",
+    "list_agents": "\U0001f465",
     "Task": "\U0001f4cb",
     "WebFetch": "\U0001f310",
     "WebSearch": "\U0001f310",
@@ -252,6 +254,70 @@ async def consume_approval_requests(
             return
         except Exception:
             log.exception("Error in approval request consumer")
+            await asyncio.sleep(1)
+
+
+async def consume_collab_messages(
+    bot: discord.Client,
+    hivemind_bot,
+) -> None:
+    """Listens for agent post_to_main calls and routes to #main + all peers."""
+    webhooks: dict[int, discord.Webhook] = {}
+
+    async def get_webhook(channel: discord.TextChannel) -> discord.Webhook:
+        """Get or create a 'hivemind' webhook for the channel."""
+        if channel.id in webhooks:
+            return webhooks[channel.id]
+        # Check for existing webhook
+        for wh in await channel.webhooks():
+            if wh.name == "hivemind":
+                webhooks[channel.id] = wh
+                return wh
+        # Create new one
+        wh = await channel.create_webhook(name="hivemind")
+        webhooks[channel.id] = wh
+        return wh
+
+    while True:
+        try:
+            msg = await collab_bridge.wait_for_message()
+
+            agent = hivemind_bot._all_agents().get(msg.agent_name)
+            if agent is None:
+                log.warning("Collab message from unknown agent %s", msg.agent_name)
+                continue
+
+            proj = hivemind_bot.projects.get(agent.project_name)
+            if proj is None:
+                log.warning("Project %s not found for collab message", agent.project_name)
+                continue
+
+            main_channel = bot.get_channel(proj.main_channel_id)
+            if main_channel is None or not isinstance(main_channel, discord.TextChannel):
+                log.warning("Main channel %d not found", proj.main_channel_id)
+                continue
+
+            # Post to #main via webhook (appears as the agent's name)
+            webhook = await get_webhook(main_channel)
+            content = msg.message
+            if len(content) > 2000:
+                content = content[:1997] + "..."
+            await webhook.send(content, username=agent.name)
+
+            # Deliver to ALL other agents in the project
+            for peer_name, peer in proj.agents.items():
+                if peer.full_name == msg.agent_name:
+                    continue  # skip self
+                text = f"[#main from {agent.name}] {msg.message}"
+                if peer.status in (Status.IDLE, Status.DONE, Status.ERROR):
+                    await peer.run_task_background(text)
+                else:
+                    await peer.send_input_background(text)
+
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            log.exception("Error in collab message consumer")
             await asyncio.sleep(1)
 
 

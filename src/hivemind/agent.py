@@ -14,6 +14,8 @@ import enum
 import json
 import logging
 import os
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -29,7 +31,7 @@ from claude_code_sdk import (
     ToolUseBlock,
 )
 
-from .tools import build_human_server
+from .tools import build_collab_server, build_human_server
 
 log = logging.getLogger(__name__)
 
@@ -91,6 +93,8 @@ class Agent:
         channel_id: int,
         system_prompt: str = "",
         allowed_tools: list[str] | None = None,
+        role: str = "",
+        persona: str = "",
     ) -> None:
         self.name = name
         self.project_name = project_name
@@ -98,6 +102,8 @@ class Agent:
         self.channel_id = channel_id
         self.system_prompt = system_prompt
         self.allowed_tools = allowed_tools or []
+        self.role = role
+        self.persona = persona
 
         self.status = Status.IDLE
         self.event_queue: asyncio.Queue[AgentEvent] = asyncio.Queue()
@@ -105,6 +111,9 @@ class Agent:
         self._task: asyncio.Task | None = None
         self._session_id: str = ""
         self._total_cost: float = 0.0
+        self._consecutive_errors: int = 0
+        self._last_activity: float = 0.0
+        self._current_task: str = ""
 
     @property
     def full_name(self) -> str:
@@ -118,6 +127,7 @@ class Agent:
         self,
         resume_session: str | None = None,
         continue_conversation: bool = False,
+        get_peers: Callable[[], list[dict[str, str]]] | None = None,
     ) -> None:
         """Initialize the ClaudeSDKClient and connect.
 
@@ -125,9 +135,14 @@ class Agent:
             resume_session: Reconnect to a specific session_id.
             continue_conversation: Pick up the most recent session in this
                 project directory (works across bot restarts and CLI sessions).
+            get_peers: Callback returning peer agent info for collaboration tools.
         """
         _ensure_project_trusted(self.project_path)
         human_server = build_human_server(self.full_name)
+        mcp_servers: dict = {"human": human_server}
+
+        if get_peers is not None:
+            mcp_servers["collab"] = build_collab_server(self.full_name, get_peers)
 
         async def on_pre_compact(input_data, tool_use_id, context):
             log.info("Agent %s: context compaction triggered", self.full_name)
@@ -139,7 +154,7 @@ class Agent:
             cwd=self.project_path,
             allowed_tools=self.allowed_tools,
             permission_mode="bypassPermissions",
-            mcp_servers={"human": human_server},
+            mcp_servers=mcp_servers,
             resume=resume_session,
             continue_conversation=continue_conversation,
             hooks={
@@ -163,6 +178,8 @@ class Agent:
             raise RuntimeError(f"Agent {self.full_name} not started")
 
         self.status = Status.RUNNING
+        self._last_activity = time.time()
+        self._current_task = task[:200]
         await self.event_queue.put(AgentEvent(kind="start", text=task))
 
         try:
@@ -170,6 +187,7 @@ class Agent:
             async for msg in self._client.receive_response():
                 await self._process_message(msg)
         except Exception as exc:
+            self._consecutive_errors += 1
             self.status = Status.ERROR
             await self.event_queue.put(AgentEvent(kind="error", text=str(exc)))
             log.exception("Agent %s error during task", self.full_name)
@@ -180,11 +198,13 @@ class Agent:
             raise RuntimeError(f"Agent {self.full_name} not started")
 
         self.status = Status.RUNNING
+        self._last_activity = time.time()
         try:
             await self._client.query(text)
             async for msg in self._client.receive_response():
                 await self._process_message(msg)
         except Exception as exc:
+            self._consecutive_errors += 1
             self.status = Status.ERROR
             await self.event_queue.put(AgentEvent(kind="error", text=str(exc)))
             log.exception("Agent %s error during send_input", self.full_name)
@@ -213,6 +233,7 @@ class Agent:
     # ------------------------------------------------------------------
 
     async def _process_message(self, msg) -> None:
+        self._last_activity = time.time()
         if isinstance(msg, AssistantMessage):
             for block in msg.content:
                 if isinstance(block, TextBlock):
@@ -240,8 +261,11 @@ class Agent:
 
         elif isinstance(msg, ResultMessage):
             self._session_id = msg.session_id
+            self._current_task = ""
             cost = msg.total_cost_usd or 0.0
             self._total_cost += cost
+            if not msg.is_error:
+                self._consecutive_errors = 0
             if msg.is_error:
                 self.status = Status.ERROR
                 await self.event_queue.put(

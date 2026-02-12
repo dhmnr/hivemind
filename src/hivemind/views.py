@@ -120,8 +120,9 @@ def status_embed(projects: dict[str, Project]) -> discord.Embed:
         for agent in proj.agents.values():
             emoji = STATUS_EMOJI.get(agent.status.value, "\u2753")
             cost = f"${agent._total_cost:.4f}" if agent._total_cost else ""
+            persona_label = f" [{agent.persona}]" if agent.persona else ""
             agent_lines.append(
-                f"{emoji} **{agent.name}** <#{agent.channel_id}>"
+                f"{emoji} **{agent.name}**{persona_label} <#{agent.channel_id}>"
                 f"{f' — {cost}' if cost else ''}"
             )
 
