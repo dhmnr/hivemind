@@ -1,0 +1,18 @@
+[Unit]
+Description=Hivemind Discord Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/hivemind
+ExecStart=/home/ubuntu/.local/bin/uv run hivemind
+EnvironmentFile=/home/ubuntu/hivemind/.env
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
