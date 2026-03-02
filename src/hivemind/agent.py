@@ -30,8 +30,46 @@ from claude_code_sdk import (
     ToolResultBlock,
     ToolUseBlock,
 )
+from claude_code_sdk._errors import MessageParseError
 
 from .tools import build_collab_server, build_human_server
+
+# ---------------------------------------------------------------------------
+# SDK monkey-patches (defensive — wrapped so we don't crash if internals change)
+# ---------------------------------------------------------------------------
+try:
+    # Workaround for claude-code-sdk buffer limit (Issue #98).
+    # The SDK hardcodes a 1 MB JSON buffer that is too small for large tool
+    # outputs (e.g. base64-encoded images/PDFs).  Bump to 10 MB until the SDK
+    # exposes ``ClaudeCodeOptions.max_buffer_size``.
+    import claude_code_sdk._internal.transport.subprocess_cli as _cli_transport
+
+    _cli_transport._MAX_BUFFER_SIZE = 10 * 1024 * 1024  # 10 MB
+except Exception:
+    pass
+
+try:
+    # Workaround for unknown message types (e.g. ``rate_limit_event``) that
+    # the SDK doesn't handle yet.  The default ``parse_message`` raises
+    # ``MessageParseError`` which kills the async generator and aborts the
+    # entire agent task.  We patch it to return ``None`` for unrecognised
+    # types so the caller can simply skip them.
+    import claude_code_sdk._internal.message_parser as _mp
+
+    _original_parse_message = _mp.parse_message
+
+    def _lenient_parse_message(data):
+        try:
+            return _original_parse_message(data)
+        except MessageParseError as exc:
+            if "Unknown message type" in str(exc):
+                log.warning("Skipping unknown SDK message type: %s", exc)
+                return None
+            raise
+
+    _mp.parse_message = _lenient_parse_message
+except Exception:
+    pass
 
 log = logging.getLogger(__name__)
 
@@ -185,7 +223,8 @@ class Agent:
         try:
             await self._client.query(task)
             async for msg in self._client.receive_response():
-                await self._process_message(msg)
+                if msg is not None:
+                    await self._process_message(msg)
         except Exception as exc:
             self._consecutive_errors += 1
             self.status = Status.ERROR
@@ -202,7 +241,8 @@ class Agent:
         try:
             await self._client.query(text)
             async for msg in self._client.receive_response():
-                await self._process_message(msg)
+                if msg is not None:
+                    await self._process_message(msg)
         except Exception as exc:
             self._consecutive_errors += 1
             self.status = Status.ERROR

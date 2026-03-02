@@ -20,6 +20,13 @@ from claude_code_sdk import create_sdk_mcp_server, tool
 
 log = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Timeout constants
+# ---------------------------------------------------------------------------
+
+# How long to wait for a human response before auto-resolving (seconds).
+APPROVAL_TIMEOUT = 120.0
+
 
 @dataclass
 class PendingRequest:
@@ -32,6 +39,11 @@ class PendingRequest:
     event: asyncio.Event = field(default_factory=asyncio.Event)
     response: str | None = None
 
+    @property
+    def has_options(self) -> bool:
+        """True when the agent provided predefined options to choose from."""
+        return len(self.options) > 0
+
 
 class ApprovalBridge:
     """Bridges MCP tool calls with Discord UI.
@@ -39,13 +51,16 @@ class ApprovalBridge:
     The agent calls `ask_human` → bridge creates a PendingRequest and fires
     a callback so the Discord side can post buttons → human clicks a button →
     Discord calls `resolve()` → the awaiting tool handler receives the answer.
+
+    If nobody responds within ``APPROVAL_TIMEOUT`` seconds:
+    * **Options provided** — the agent is told the human didn't respond and
+      asked to pick the best option itself using its own judgement.
+    * **No options (open-ended)** — the prompt is re-posted indefinitely
+      because only a human can provide a free-text answer.
     """
 
     def __init__(self) -> None:
         self._pending: dict[str, PendingRequest] = {}
-        # Callback: (request: PendingRequest) -> None
-        # Set by the bot to post the question to Discord.
-        self.on_request: asyncio.Future | None = None
         self._request_queue: asyncio.Queue[PendingRequest] = asyncio.Queue()
 
     async def request(
@@ -54,17 +69,47 @@ class ApprovalBridge:
         question: str,
         options: list[str] | None = None,
     ) -> str:
-        """Called from the MCP tool handler.  Blocks until the human responds."""
+        """Called from the MCP tool handler.  Blocks until human responds or timeout."""
+        opts = options or []
         req = PendingRequest(
             request_id=str(uuid.uuid4()),
             agent_name=agent_name,
             question=question,
-            options=options or [],
+            options=opts,
         )
         self._pending[req.request_id] = req
-        log.info("ask_human request %s from agent %s: %s", req.request_id, agent_name, question)
+        log.info(
+            "ask_human request %s from agent %s (has_options=%s): %s",
+            req.request_id, agent_name, req.has_options, question,
+        )
         await self._request_queue.put(req)
-        await req.event.wait()
+
+        if req.has_options:
+            # Options provided — wait once, then let the agent decide.
+            try:
+                await asyncio.wait_for(req.event.wait(), timeout=APPROVAL_TIMEOUT)
+            except asyncio.TimeoutError:
+                options_str = ", ".join(f'"{o}"' for o in req.options)
+                req.response = (
+                    f"The human operator did not respond within "
+                    f"{int(APPROVAL_TIMEOUT)} seconds.  "
+                    f"The available options were: {options_str}.  "
+                    f"Please pick the best option using your own judgement "
+                    f"and continue."
+                )
+                log.info(
+                    "Request %s timed out with options, agent will decide",
+                    req.request_id,
+                )
+        else:
+            # Open-ended question — only a human can answer.
+            # Block until the human actually responds (no timeout).
+            log.info(
+                "Request %s is open-ended, blocking until human responds",
+                req.request_id,
+            )
+            await req.event.wait()
+
         self._pending.pop(req.request_id, None)
         return req.response or ""
 

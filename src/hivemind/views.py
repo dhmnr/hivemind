@@ -52,6 +52,8 @@ class ApprovalView(discord.ui.View):
         self.request_id = request_id
         self.bridge = bridge
         self.agent = agent
+        self.has_options = len(options) > 0
+        self._message: discord.Message | None = None  # set after send
 
         for i, option in enumerate(options[:4]):
             btn = discord.ui.Button(
@@ -85,6 +87,25 @@ class ApprovalView(discord.ui.View):
     async def _custom_callback(self, interaction: discord.Interaction) -> None:
         modal = ReplyModal(self.request_id, self.bridge, self.agent)
         await interaction.response.send_modal(modal)
+
+    async def on_timeout(self) -> None:
+        """Disable all buttons when the view times out."""
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+        if self._message:
+            try:
+                if self.has_options:
+                    label = "\u23f0 **Timed out** \u2014 agent will decide"
+                else:
+                    label = (
+                        "\u23f0 **Buttons expired** \u2014 agent is still "
+                        "waiting for a human response. Use the agent's "
+                        "channel to reply directly."
+                    )
+                await self._message.edit(content=label, view=self)
+            except discord.HTTPException:
+                pass
 
 
 # ---------------------------------------------------------------------------

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import TYPE_CHECKING
 
@@ -22,6 +23,8 @@ if TYPE_CHECKING:
     from .agent import Agent
 
 log = logging.getLogger(__name__)
+
+_AT_MENTION_RE = re.compile(r"@(\w+)")
 
 BATCH_INTERVAL = 2.0
 MAX_MSG_LEN = 1900
@@ -245,11 +248,14 @@ async def consume_approval_requests(
                 bridge=approval_bridge,
                 agent=agent,
             )
-            await channel.send(
-                "\U0001f514 **Agent needs input:**",
-                embed=embed,
-                view=view,
-            )
+
+            if req.has_options:
+                header = "\U0001f514 **Agent needs input:**"
+            else:
+                header = "\U0001f6d1 **Agent needs human input (blocking):**"
+
+            msg = await channel.send(header, embed=embed, view=view)
+            view._message = msg  # so on_timeout can edit it
         except asyncio.CancelledError:
             return
         except Exception:
@@ -297,12 +303,13 @@ async def consume_collab_messages(
                 log.warning("Main channel %d not found", proj.main_channel_id)
                 continue
 
-            # Post to #main via webhook (appears as the agent's name)
+            # Post to #main via webhook (appears as the agent's name).
+            # Convert @username text into proper Discord <@user_id> mentions
+            # so that humans actually get pinged.
             webhook = await get_webhook(main_channel)
-            content = msg.message
-            if len(content) > 2000:
-                content = content[:1997] + "..."
-            await webhook.send(content, username=agent.name)
+            resolved = await _resolve_mentions(msg.message, main_channel.guild)
+            for chunk in _split_text(resolved, MAX_MSG_LEN):
+                await webhook.send(chunk, username=agent.name)
 
             # Deliver to ALL other agents in the project
             for peer_name, peer in proj.agents.items():
@@ -325,14 +332,65 @@ async def consume_collab_messages(
 # Helpers
 # ---------------------------------------------------------------------------
 
+async def _resolve_mentions(text: str, guild: discord.Guild) -> str:
+    """Replace ``@username`` with ``<@user_id>`` so Discord sends real pings.
+
+    Checks the member cache first, then falls back to ``query_members``
+    (gateway lookup — does not require the privileged members intent).
+    Unmatched mentions pass through unchanged.
+    """
+    # Collect unique @mentions to resolve
+    usernames = set(_AT_MENTION_RE.findall(text))
+    if not usernames:
+        return text
+
+    resolved: dict[str, int] = {}  # username → user_id
+    for username in usernames:
+        # Try cache first
+        member = guild.get_member_named(username)
+        if member is not None:
+            resolved[username] = member.id
+            continue
+        # Fall back to gateway query (works without members intent)
+        try:
+            results = await guild.query_members(query=username, limit=5)
+            for m in results:
+                if m.name == username:
+                    resolved[username] = m.id
+                    break
+        except discord.HTTPException:
+            pass
+
+    def _replace(match: re.Match[str]) -> str:
+        uid = resolved.get(match.group(1))
+        if uid is not None:
+            return f"<@{uid}>"
+        return match.group(0)
+
+    return _AT_MENTION_RE.sub(_replace, text)
+
+
 def _split_text(text: str, limit: int) -> list[str]:
-    """Split text into chunks at newline boundaries."""
+    """Split text into chunks that respect Discord's message length limit.
+
+    Splits at newline boundaries when possible. Lines that exceed *limit*
+    on their own are hard-wrapped so every returned chunk is ≤ *limit* chars.
+    """
     if len(text) <= limit:
         return [text]
     chunks: list[str] = []
     current: list[str] = []
     current_len = 0
     for line in text.split("\n"):
+        # Hard-wrap lines that alone exceed the limit
+        while len(line) > limit:
+            # Flush anything accumulated first
+            if current:
+                chunks.append("\n".join(current))
+                current = []
+                current_len = 0
+            chunks.append(line[:limit])
+            line = line[limit:]
         if current_len + len(line) + 1 > limit and current:
             chunks.append("\n".join(current))
             current = []

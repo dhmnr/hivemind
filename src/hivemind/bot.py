@@ -64,13 +64,24 @@ class HivemindBot(discord.Client):
         self._approval_task: asyncio.Task | None = None
         self._collab_task: asyncio.Task | None = None
         self._watchdog_task: asyncio.Task | None = None
+        self._ready_fired: bool = False
+
+        # Load state eagerly so it's always available before close() runs.
+        self._load_state()
 
     # ------------------------------------------------------------------
     # State persistence
     # ------------------------------------------------------------------
 
     def _save_state(self) -> None:
-        """Serialize project metadata (including agents) to STATE_FILE."""
+        """Serialize project metadata (including agents) to STATE_FILE.
+
+        Refuses to overwrite a non-empty state file with empty data to
+        prevent accidental state loss during aborted startups.
+        """
+        if not self.projects and STATE_FILE.exists() and STATE_FILE.stat().st_size > 2:
+            log.warning("Skipping state save — projects dict is empty but state file exists")
+            return
         data = {}
         for name, proj in self.projects.items():
             data[name] = {
@@ -381,7 +392,7 @@ class HivemindBot(discord.Client):
         if not proj.agents:
             return
 
-        text = f"[#main from {message.author.display_name}] {message.content}"
+        text = f"[#main from {message.author.name}] {message.content}"
         await message.add_reaction("\U0001f4e8")
 
         for agent in proj.agents.values():
@@ -432,7 +443,13 @@ class HivemindBot(discord.Client):
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s (id=%s)", self.user, self.user.id)
-        self._load_state()
+
+        # on_ready can fire multiple times on reconnect — only bootstrap once.
+        if self._ready_fired:
+            log.info("on_ready fired again (reconnect), skipping bootstrap")
+            return
+        self._ready_fired = True
+
         await self._resume_agents()
         self._approval_task = asyncio.create_task(
             consume_approval_requests(self, self),
