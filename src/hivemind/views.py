@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING
 
 import discord
 
+from .tools import APPROVAL_TIMEOUT
+
 if TYPE_CHECKING:
     from .bot import Project
 
@@ -46,9 +48,9 @@ class ApprovalView(discord.ui.View):
         bridge,
         agent,
         *,
-        timeout: float = 600,
+        timeout: float | None = None,
     ) -> None:
-        super().__init__(timeout=timeout)
+        super().__init__(timeout=timeout or APPROVAL_TIMEOUT)
         self.request_id = request_id
         self.bridge = bridge
         self.agent = agent
@@ -89,20 +91,36 @@ class ApprovalView(discord.ui.View):
         await interaction.response.send_modal(modal)
 
     async def on_timeout(self) -> None:
-        """Disable all buttons when the view times out."""
+        """Disable buttons and resolve the bridge request so the agent unblocks."""
         for item in self.children:
             if isinstance(item, discord.ui.Button):
                 item.disabled = True
+
+        # Actually unblock the agent — this is the critical part.
+        # If the bridge already resolved (human clicked in time), resolve()
+        # returns False and this is a no-op.
+        if self.has_options:
+            label = "\u23f0 **Timed out** \u2014 agent will decide"
+            self.bridge.resolve(
+                self.request_id,
+                f"The human operator did not respond in time. "
+                f"Please pick the best option using your own judgement "
+                f"and continue.",
+            )
+        else:
+            label = (
+                "\u23f0 **Timed out** \u2014 agent will proceed "
+                "on its own"
+            )
+            self.bridge.resolve(
+                self.request_id,
+                "The human operator did not respond in time. "
+                "Use your best judgement to proceed. If you absolutely "
+                "need human input, you can ask again.",
+            )
+
         if self._message:
             try:
-                if self.has_options:
-                    label = "\u23f0 **Timed out** \u2014 agent will decide"
-                else:
-                    label = (
-                        "\u23f0 **Buttons expired** \u2014 agent is still "
-                        "waiting for a human response. Use the agent's "
-                        "channel to reply directly."
-                    )
                 await self._message.edit(content=label, view=self)
             except discord.HTTPException:
                 pass

@@ -52,11 +52,9 @@ class ApprovalBridge:
     a callback so the Discord side can post buttons → human clicks a button →
     Discord calls `resolve()` → the awaiting tool handler receives the answer.
 
-    If nobody responds within ``APPROVAL_TIMEOUT`` seconds:
-    * **Options provided** — the agent is told the human didn't respond and
-      asked to pick the best option itself using its own judgement.
-    * **No options (open-ended)** — the prompt is re-posted indefinitely
-      because only a human can provide a free-text answer.
+    If nobody responds within ``APPROVAL_TIMEOUT`` seconds the Discord view
+    resolves the request automatically — the agent is told the human didn't
+    respond and asked to use its best judgement to proceed.
     """
 
     def __init__(self) -> None:
@@ -84,31 +82,35 @@ class ApprovalBridge:
         )
         await self._request_queue.put(req)
 
-        if req.has_options:
-            # Options provided — wait once, then let the agent decide.
-            try:
-                await asyncio.wait_for(req.event.wait(), timeout=APPROVAL_TIMEOUT)
-            except asyncio.TimeoutError:
-                options_str = ", ".join(f'"{o}"' for o in req.options)
-                req.response = (
-                    f"The human operator did not respond within "
-                    f"{int(APPROVAL_TIMEOUT)} seconds.  "
-                    f"The available options were: {options_str}.  "
-                    f"Please pick the best option using your own judgement "
-                    f"and continue."
-                )
-                log.info(
-                    "Request %s timed out with options, agent will decide",
-                    req.request_id,
-                )
-        else:
-            # Open-ended question — only a human can answer.
-            # Block until the human actually responds (no timeout).
-            log.info(
-                "Request %s is open-ended, blocking until human responds",
-                req.request_id,
+        # Wait for the Discord view to resolve (human clicks or view times
+        # out).  The view's on_timeout calls bridge.resolve() so the event
+        # is guaranteed to fire eventually — but we add a safety-net timeout
+        # here too (view timeout + 30s headroom) to prevent permanent freezes
+        # in case the view cleanup fails for any reason.
+        safety_timeout = APPROVAL_TIMEOUT + 30.0
+        try:
+            await asyncio.wait_for(req.event.wait(), timeout=safety_timeout)
+        except asyncio.TimeoutError:
+            # Should rarely hit this — means the view on_timeout didn't fire.
+            log.warning(
+                "Request %s hit safety timeout (%ss), force-resolving",
+                req.request_id, safety_timeout,
             )
-            await req.event.wait()
+            if req.response is None:
+                if req.has_options:
+                    options_str = ", ".join(f'"{o}"' for o in req.options)
+                    req.response = (
+                        f"The human operator did not respond.  "
+                        f"The available options were: {options_str}.  "
+                        f"Please pick the best option using your own "
+                        f"judgement and continue."
+                    )
+                else:
+                    req.response = (
+                        "The human operator did not respond.  "
+                        "Use your best judgement to proceed. If you "
+                        "absolutely need human input, you can ask again."
+                    )
 
         self._pending.pop(req.request_id, None)
         return req.response or ""
