@@ -361,6 +361,20 @@ class HivemindBot(discord.Client):
             elif a.role:
                 label += f" ({a.role})"
             peer_names.append(label)
+        autonomy = (
+            "\n## Autonomous Agent Constraints\n"
+            "You are running as a fully autonomous agent inside the Claude Code "
+            "SDK. There is NO interactive human terminal attached to your "
+            "session.\n\n"
+            "**NEVER use `EnterPlanMode` or `ExitPlanMode`.** Plan mode requires "
+            "human approval via the terminal UI, which does not exist in your "
+            "environment. Entering plan mode will freeze you permanently. "
+            "Instead, just proceed directly with implementation. If you want "
+            "to outline a plan, write it as a normal text message, then "
+            "execute it immediately without waiting for approval.\n"
+        )
+        parts.append(autonomy)
+
         collab = (
             "\n## Collaboration\n"
             "You are part of a team of agents working on this project. "
